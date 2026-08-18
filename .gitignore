@@ -1,0 +1,4 @@
+.obsidian/
+data.json
+node_modules/
+*.log
