@@ -66,6 +66,8 @@ module.exports = class EnhancedWordCountPlugin extends Plugin {
     this.settings = { ...DEFAULT_SETTINGS, ...(await this.loadData() || {}) };
     this.normaliseSettings();
     this.isDirty = true;
+    this.refreshInProgress = false;
+    this.refreshQueued = false;
     this.statusBarItem = this.addStatusBarItem();
     this.statusBarItem.addClass("enhanced-word-count");
     this.registerDomEvent(this.statusBarItem, "click", () => {
@@ -83,6 +85,7 @@ module.exports = class EnhancedWordCountPlugin extends Plugin {
     this.registerEvent(
       this.app.workspace.on("editor-change", () => {
         this.isDirty = true;
+        this.queueRefresh();
       })
     );
 
@@ -90,14 +93,14 @@ module.exports = class EnhancedWordCountPlugin extends Plugin {
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
         this.isDirty = true;
-        this.refresh();
+        this.queueRefresh();
       })
     );
 
     this.restartRefreshTimer();
     this.register(() => this.stopRefreshTimer());
 
-    this.app.workspace.onLayoutReady(() => this.refresh());
+    this.app.workspace.onLayoutReady(() => this.queueRefresh());
   }
 
   normaliseSettings() {
@@ -113,6 +116,15 @@ module.exports = class EnhancedWordCountPlugin extends Plugin {
     this.refreshTimer = window.setInterval(() => this.refresh(), this.settings.refreshSeconds * 1000);
   }
 
+  queueRefresh() {
+    if (this.refreshQueued) return;
+    this.refreshQueued = true;
+    window.setTimeout(() => {
+      this.refreshQueued = false;
+      this.refresh();
+    }, 300);
+  }
+
   stopRefreshTimer() {
     if (this.refreshTimer !== undefined) {
       window.clearInterval(this.refreshTimer);
@@ -125,7 +137,7 @@ module.exports = class EnhancedWordCountPlugin extends Plugin {
     await this.saveData(this.settings);
     this.restartRefreshTimer();
     this.isDirty = true;
-    this.refresh();
+    this.queueRefresh();
   }
 
   async toggleDisplayMode() {
@@ -134,10 +146,13 @@ module.exports = class EnhancedWordCountPlugin extends Plugin {
   }
 
   refresh() {
-    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (this.refreshInProgress) return;
+    this.refreshInProgress = true;
+    try {
+      const view = this.app.workspace.getActiveViewOfType(MarkdownView);
 
-    if (!view) {
-      this.statusBarItem.hide();
+    if (!view || !view.editor || !this.statusBarItem?.isConnected) {
+      this.statusBarItem?.hide();
       return;
     }
 
@@ -156,6 +171,12 @@ module.exports = class EnhancedWordCountPlugin extends Plugin {
       `每 ${refreshSeconds} 秒刷新；点击可切换`
     );
     this.isDirty = false;
+    } catch (error) {
+      console.error("[enhanced-word-count] refresh failed", error);
+      this.isDirty = true;
+    } finally {
+      this.refreshInProgress = false;
+    }
   }
 };
 
