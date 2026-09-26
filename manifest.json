@@ -1,9 +1,9 @@
 {
   "id": "enhanced-word-count",
-  "name": "字数统计增强（Word Count+）",
-  "version": "1.2.1",
+  "name": "统计增强",
+  "version": "1.3.0",
   "minAppVersion": "1.4.0",
-  "description": "在单独字数与千字显示之间切换，并自定义状态栏刷新时间。",
+  "description": "统计字数、字符数和当前页面的一至五级标题，并自定义状态栏刷新时间。",
   "author": "Vala",
   "isDesktopOnly": false
 }
