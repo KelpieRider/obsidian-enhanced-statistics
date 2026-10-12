@@ -1,9 +1,9 @@
 {
-  "id": "enhanced-word-count",
-  "name": "统计增强",
-  "version": "1.3.0",
+  "id": "valar-style-enhancement",
+  "name": "Valar的样式增强",
+  "version": "1.4.1",
   "minAppVersion": "1.4.0",
-  "description": "统计字数、字符数和当前页面的一至五级标题，并自定义状态栏刷新时间。",
-  "author": "Vala",
+  "description": "Valar's Style Enhancements：统计字数、字符数和一至五级标题，并支持文件目录长文件名自动换行。",
+  "author": "Valar",
   "isDesktopOnly": false
 }

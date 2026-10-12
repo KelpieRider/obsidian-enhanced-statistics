@@ -1,9 +1,18 @@
-const { MarkdownView, Plugin, PluginSettingTab, Setting } = require("obsidian");
+const { MarkdownView, Notice, Plugin, PluginSettingTab, Setting } = require("obsidian");
 
 const DEFAULT_SETTINGS = {
   displayMode: "thousands",
+  headingStats: true,
   refreshSeconds: 15,
+  fileExplorerWrap: true,
+  wrapMinChars: 20,
+  wrapOnEdit: true,
 };
+
+const WRAP_STYLE_ID = "valar-nav-wrap-style";
+const WRAP_CLASS = "valar-nav-wrap";
+const WRAP_EDIT_CLASS = "valar-nav-wrap-on-edit";
+
 const NON_WHITESPACE = /\S/u;
 const LETTER_OR_NUMBER = /[\p{L}\p{N}\p{M}]/u;
 
@@ -96,7 +105,6 @@ function countHeadings(text) {
       continue;
     }
 
-    // 同时支持 Markdown 的 Setext 标题写法：文本下一行是 === 或 ---。
     if (index + 1 < lines.length && line.trim()) {
       const setextHeading = /^ {0,3}(=+|-+)[ \t]*$/.exec(lines[index + 1]);
       if (setextHeading) {
@@ -120,7 +128,74 @@ function formatHeadingCount(counts) {
   return counts.join("/");
 }
 
-module.exports = class EnhancedWordCountPlugin extends Plugin {
+/**
+ * 定位光标所在行对应的标题，并返回从一级标题到该标题的层级链。
+ * 若光标不在标题行（ATX 标题行或其下划线）上，返回 null。
+ */
+function getHeadingChainAt(text, targetLine) {
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  const chain = [];
+  let fenceMarker;
+  let fenceLength = 0;
+  let targetLevel = 0;
+
+  const limit = Math.min(Math.max(targetLine, 0), lines.length - 1);
+
+  for (let index = 0; index <= limit; index += 1) {
+    const line = lines[index];
+    const fence = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+
+    if (fenceMarker) {
+      if (fence && fence[1][0] === fenceMarker && fence[1].length >= fenceLength) {
+        fenceMarker = undefined;
+        fenceLength = 0;
+      }
+      continue;
+    }
+
+    if (fence) {
+      fenceMarker = fence[1][0];
+      fenceLength = fence[1].length;
+      continue;
+    }
+
+    const atx = /^ {0,3}(#{1,6})(?:[ \t]+(.*?)|[ \t]*)$/.exec(line);
+    if (atx) {
+      const level = atx[1].length;
+      const title = (atx[2] || "").replace(/\s+#+\s*$/, "").trim();
+      while (chain.length > 0 && chain[chain.length - 1].level >= level) {
+        chain.pop();
+      }
+      chain.push({ level, title });
+      if (index === targetLine) targetLevel = level;
+      continue;
+    }
+
+    if (index + 1 < lines.length && line.trim()) {
+      const setext = /^ {0,3}(=+|-+)[ \t]*$/.exec(lines[index + 1]);
+      if (setext) {
+        const level = setext[1][0] === "=" ? 1 : 2;
+        const title = line.trim();
+        while (chain.length > 0 && chain[chain.length - 1].level >= level) {
+          chain.pop();
+        }
+        chain.push({ level, title });
+        if (index === targetLine || index + 1 === targetLine) targetLevel = level;
+        continue;
+      }
+    }
+  }
+
+  if (!targetLevel) return null;
+
+  const titles = chain
+    .filter((item) => item.level <= targetLevel && item.title)
+    .map((item) => item.title);
+
+  return titles;
+}
+
+module.exports = class ValarStyleEnhancementPlugin extends Plugin {
   async onload() {
     this.settings = { ...DEFAULT_SETTINGS, ...(await this.loadData() || {}) };
     this.normaliseSettings();
@@ -128,27 +203,41 @@ module.exports = class EnhancedWordCountPlugin extends Plugin {
     this.refreshInProgress = false;
     this.refreshQueued = false;
     this.statusBarItem = this.addStatusBarItem();
-    this.statusBarItem.addClass("enhanced-word-count");
+    this.statusBarItem.addClass("valar-style-enhancement");
     this.registerDomEvent(this.statusBarItem, "click", () => {
       void this.toggleDisplayMode();
     });
 
-    this.addSettingTab(new EnhancedWordCountSettingTab(this.app, this));
+    this.addSettingTab(new ValarStyleEnhancementSettingTab(this.app, this));
     this.addCommand({
       id: "toggle-display-mode",
       name: "切换字数显示方式（单独字数 / 千字）",
       callback: () => void this.toggleDisplayMode(),
     });
 
-    // 编辑时只设置标记，避免每次按键都扫描整篇长文。
     this.registerEvent(
-      this.app.workspace.on("editor-change", () => {
-        this.isDirty = true;
-        this.queueRefresh();
+      this.app.workspace.on("editor-menu", (menu, editor, view) => {
+        if (!(view instanceof MarkdownView)) return;
+        const address = this.getChapterAddress(editor, view);
+        if (!address) return;
+
+        menu.addItem((item) => {
+          item
+            .setTitle("获取章节地址")
+            .setIcon("map-pin")
+            .onClick(async () => {
+              await this.copyChapterAddress(address);
+            });
+        });
       })
     );
 
-    // 切换笔记时立即更新一次，不必等待下一个 15 秒周期。
+    this.registerEvent(
+      this.app.workspace.on("editor-change", () => {
+        this.isDirty = true;
+      })
+    );
+
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
         this.isDirty = true;
@@ -160,14 +249,69 @@ module.exports = class EnhancedWordCountPlugin extends Plugin {
     this.register(() => this.stopRefreshTimer());
 
     this.app.workspace.onLayoutReady(() => this.queueRefresh());
+
+    // ===== 文件目录自动换行 =====
+    this.applyWrapStyle();
+    this.wrapMutationObserver = new MutationObserver(() => {
+      this.scheduleWrapRefresh();
+    });
+
+    this.register(() => {
+      this.wrapMutationObserver.disconnect();
+      document.body.classList.remove(WRAP_EDIT_CLASS);
+      document.getElementById(WRAP_STYLE_ID)?.remove();
+    });
+
+    this.registerEvent(
+      this.app.workspace.on("layout-change", () => {
+        this.observeWrapExplorers();
+        this.scheduleWrapRefresh();
+      })
+    );
+
+    this.observeWrapExplorers();
+    this.refreshWrap();
+    this.updateWrapBodyClass();
+  }
+
+  getChapterAddress(editor, view) {
+    if (!view || !view.file || !editor) return null;
+
+    const titles = getHeadingChainAt(editor.getValue(), editor.getCursor().line);
+    if (!titles || titles.length === 0) return null;
+
+    const folderName = view.file.parent && view.file.parent.name;
+    const parts = folderName
+      ? [folderName, view.file.basename, ...titles]
+      : [view.file.basename, ...titles];
+
+    return parts.join(".");
+  }
+
+  async copyChapterAddress(address) {
+    try {
+      await navigator.clipboard.writeText(address);
+      new Notice(`已复制章节地址：${address}`);
+    } catch (error) {
+      console.error("[valar-style-enhancement] copy chapter address failed", error);
+      new Notice("复制章节地址失败，请手动复制");
+    }
   }
 
   normaliseSettings() {
     this.settings.displayMode = this.settings.displayMode === "exact" ? "exact" : "thousands";
+    this.settings.headingStats = this.settings.headingStats !== false;
     const seconds = Number(this.settings.refreshSeconds);
     this.settings.refreshSeconds = Number.isFinite(seconds)
       ? Math.min(3600, Math.max(1, Math.round(seconds)))
       : DEFAULT_SETTINGS.refreshSeconds;
+
+    this.settings.fileExplorerWrap = this.settings.fileExplorerWrap !== false;
+    this.settings.wrapOnEdit = this.settings.wrapOnEdit !== false;
+    const minChars = Number(this.settings.wrapMinChars);
+    this.settings.wrapMinChars = Number.isFinite(minChars)
+      ? Math.max(0, Math.round(minChars))
+      : DEFAULT_SETTINGS.wrapMinChars;
   }
 
   restartRefreshTimer() {
@@ -197,6 +341,8 @@ module.exports = class EnhancedWordCountPlugin extends Plugin {
     this.restartRefreshTimer();
     this.isDirty = true;
     this.queueRefresh();
+    this.refreshWrap();
+    this.updateWrapBodyClass();
   }
 
   async toggleDisplayMode() {
@@ -210,40 +356,127 @@ module.exports = class EnhancedWordCountPlugin extends Plugin {
     try {
       const view = this.app.workspace.getActiveViewOfType(MarkdownView);
 
-    if (!view || !view.editor || !this.statusBarItem?.isConnected) {
-      this.statusBarItem?.hide();
-      return;
-    }
+      if (!view || !view.editor || !this.statusBarItem?.isConnected) {
+        this.statusBarItem?.hide();
+        return;
+      }
 
-    this.statusBarItem.show();
-    if (!this.isDirty) return;
+      this.statusBarItem.show();
+      if (!this.isDirty) return;
 
-    const text = view.editor.getValue();
-    const { characterCount, wordCount } = countText(text);
-    const headingCounts = countHeadings(text);
-    const { displayMode, refreshSeconds } = this.settings;
-    const display = `${formatCount(wordCount, displayMode)}词 · ` +
-      `${formatCount(characterCount, displayMode)}字符 · 标题 ${formatHeadingCount(headingCounts)}`;
-    this.statusBarItem.setText(display);
-    this.statusBarItem.setAttr(
-      "aria-label",
-      `精确词数：${wordCount.toLocaleString("zh-CN")}；` +
-      `精确字符数：${characterCount.toLocaleString("zh-CN")}；` +
-      `标题数量（一级至${headingCounts.length}级）：${formatHeadingCount(headingCounts)}；` +
-      `当前显示：${displayMode === "exact" ? "单独字数" : "千字"}；` +
-      `每 ${refreshSeconds} 秒刷新；点击可切换`
-    );
-    this.isDirty = false;
+      const text = view.editor.getValue();
+      const { characterCount, wordCount } = countText(text);
+      const { displayMode, headingStats, refreshSeconds } = this.settings;
+      const displayParts = [
+        `${formatCount(wordCount, displayMode)}词`,
+        `${formatCount(characterCount, displayMode)}字符`,
+      ];
+      let headingCounts;
+      if (headingStats) {
+        headingCounts = countHeadings(text);
+        displayParts.push(`标题 ${formatHeadingCount(headingCounts)}`);
+      }
+      const display = displayParts.join(" · ");
+      let ariaLabel =
+        `精确词数：${wordCount.toLocaleString("zh-CN")}；` +
+        `精确字符数：${characterCount.toLocaleString("zh-CN")}；`;
+      if (headingStats) {
+        ariaLabel += `标题数量（1级至${headingCounts.length}级）：${formatHeadingCount(headingCounts)}；`;
+      }
+      this.statusBarItem.setText(display);
+      this.statusBarItem.setAttr(
+        "aria-label",
+        ariaLabel +
+          `当前显示：${displayMode === "exact" ? "单独字数" : "千字"}；` +
+          `每 ${refreshSeconds} 秒刷新；点击可切换`
+      );
+      this.isDirty = false;
     } catch (error) {
-      console.error("[enhanced-word-count] refresh failed", error);
+      console.error("[valar-style-enhancement] refresh failed", error);
       this.isDirty = true;
     } finally {
       this.refreshInProgress = false;
     }
   }
+
+  applyWrapStyle() {
+    document.getElementById(WRAP_STYLE_ID)?.remove();
+    const style = document.head.createEl("style", {
+      attr: { id: WRAP_STYLE_ID }
+    });
+    style.textContent = `
+.nav-file-title.${WRAP_CLASS},
+.nav-folder-title.${WRAP_CLASS} {
+  --nav-item-white-space: pre-wrap;
+}
+
+body.${WRAP_EDIT_CLASS} .nav-file-title-content[contenteditable="true"],
+body.${WRAP_EDIT_CLASS} .nav-folder-title-content[contenteditable="true"] {
+  --nav-item-white-space: pre-wrap;
+}
+`;
+  }
+
+  getWrapExplorerEls() {
+    return Array.from(
+      document.querySelectorAll(
+        '.workspace-leaf-content[data-type="file-explorer"]'
+      )
+    );
+  }
+
+  observeWrapExplorers() {
+    for (const el of this.getWrapExplorerEls()) {
+      if (el.dataset.valarWrapObserved) {
+        continue;
+      }
+      el.dataset.valarWrapObserved = "true";
+      this.wrapMutationObserver.observe(el, {
+        childList: true,
+        subtree: true
+      });
+    }
+  }
+
+  scheduleWrapRefresh() {
+    if (this.wrapRefreshTimer) {
+      clearTimeout(this.wrapRefreshTimer);
+    }
+    this.wrapRefreshTimer = window.setTimeout(() => {
+      this.wrapRefreshTimer = null;
+      this.refreshWrap();
+    }, 250);
+  }
+
+  refreshWrap() {
+    const enabled = this.settings.fileExplorerWrap;
+    const minChars = this.settings.wrapMinChars;
+
+    for (const explorer of this.getWrapExplorerEls()) {
+      const titles = explorer.querySelectorAll(
+        ".nav-file-title, .nav-folder-title"
+      );
+
+      for (const title of titles) {
+        const content = title.querySelector(
+          ".nav-file-title-content, .nav-folder-title-content"
+        );
+        const text = content ? content.textContent || "" : "";
+        const shouldWrap = enabled && text.length > minChars;
+        title.classList.toggle(WRAP_CLASS, shouldWrap);
+      }
+    }
+  }
+
+  updateWrapBodyClass() {
+    document.body.classList.toggle(
+      WRAP_EDIT_CLASS,
+      this.settings.fileExplorerWrap && this.settings.wrapOnEdit
+    );
+  }
 };
 
-class EnhancedWordCountSettingTab extends PluginSettingTab {
+class ValarStyleEnhancementSettingTab extends PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -253,8 +486,23 @@ class EnhancedWordCountSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     const plugin = this.plugin;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "统计增强" });
+    containerEl.createEl("h2", { text: "Valar的样式增强" });
+
+    containerEl.createEl("h3", { text: "字数统计" });
+
     let draftRefreshSeconds = plugin.settings.refreshSeconds;
+
+    new Setting(containerEl)
+      .setName("标题统计")
+      .setDesc("开启后在状态栏显示当前页面的1至5级标题数量；关闭后不扫描标题。")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(plugin.settings.headingStats)
+          .onChange(async (value) => {
+            plugin.settings.headingStats = value;
+            await plugin.saveSettings();
+          })
+      );
 
     new Setting(containerEl)
       .setName("显示方式")
@@ -272,7 +520,7 @@ class EnhancedWordCountSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("刷新时间（秒）")
-      .setDesc("编辑时只标记内容变化；到达此时间后才重新统计。范围为 1–3600 秒，默认 15 秒。")
+      .setDesc("编辑时只标记内容变化；到达此时间后才重新统计。范围为 1–3600 秒。")
       .addText((text) =>
         text
           .setPlaceholder(String(DEFAULT_SETTINGS.refreshSeconds))
@@ -283,7 +531,7 @@ class EnhancedWordCountSettingTab extends PluginSettingTab {
       )
       .addButton((button) =>
         button
-          .setButtonText("刷新并应用")
+          .setButtonText("应用")
           .setCta()
           .onClick(async () => {
             const seconds = Number(draftRefreshSeconds);
@@ -291,6 +539,59 @@ class EnhancedWordCountSettingTab extends PluginSettingTab {
             plugin.settings.refreshSeconds = seconds;
             await plugin.saveSettings();
             this.display();
+          })
+      );
+
+    containerEl.createEl("h3", { text: "文件目录自动换行" });
+
+    let draftWrapMinChars = plugin.settings.wrapMinChars;
+
+    new Setting(containerEl)
+      .setName("文件目录自动换行")
+      .setDesc("开启后，长文件名和文件夹名会换行显示完整内容；关闭则恢复单行省略号。")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(plugin.settings.fileExplorerWrap)
+          .onChange(async (value) => {
+            plugin.settings.fileExplorerWrap = value;
+            await plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("换行最小字符数")
+      .setDesc("超过这个字符数才换行；小于等于该数值的保持单行。")
+      .addText((text) =>
+        text
+          .setPlaceholder(String(DEFAULT_SETTINGS.wrapMinChars))
+          .setValue(String(plugin.settings.wrapMinChars))
+          .onChange((value) => {
+            draftWrapMinChars = value;
+          })
+      )
+      .addButton((button) =>
+        button
+          .setButtonText("应用")
+          .setCta()
+          .onClick(async () => {
+            const parsed = parseInt(draftWrapMinChars, 10);
+            plugin.settings.wrapMinChars = Number.isFinite(parsed)
+              ? Math.max(0, parsed)
+              : DEFAULT_SETTINGS.wrapMinChars;
+            await plugin.saveSettings();
+            this.display();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("重命名时也换行")
+      .setDesc("开启后，编辑文件名时也能多行显示完整内容。")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(plugin.settings.wrapOnEdit)
+          .onChange(async (value) => {
+            plugin.settings.wrapOnEdit = value;
+            await plugin.saveSettings();
           })
       );
   }
