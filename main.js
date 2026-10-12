@@ -1,6 +1,7 @@
 const { MarkdownView, Notice, Plugin, PluginSettingTab, Setting } = require("obsidian");
 
 const DEFAULT_SETTINGS = {
+  statisticsEnabled: true,
   displayMode: "thousands",
   headingStats: true,
   refreshSeconds: 15,
@@ -299,6 +300,7 @@ module.exports = class ValarStyleEnhancementPlugin extends Plugin {
   }
 
   normaliseSettings() {
+    this.settings.statisticsEnabled = this.settings.statisticsEnabled !== false;
     this.settings.displayMode = this.settings.displayMode === "exact" ? "exact" : "thousands";
     this.settings.headingStats = this.settings.headingStats !== false;
     const seconds = Number(this.settings.refreshSeconds);
@@ -358,6 +360,11 @@ module.exports = class ValarStyleEnhancementPlugin extends Plugin {
 
       if (!view || !view.editor || !this.statusBarItem?.isConnected) {
         this.statusBarItem?.hide();
+        return;
+      }
+
+      if (!this.settings.statisticsEnabled) {
+        this.statusBarItem.hide();
         return;
       }
 
@@ -488,23 +495,39 @@ class ValarStyleEnhancementSettingTab extends PluginSettingTab {
     containerEl.empty();
     containerEl.createEl("h2", { text: "Valar的样式增强" });
 
-    containerEl.createEl("h3", { text: "字数统计" });
+    containerEl.createEl("h3", { text: "A 统计增强" });
 
-    let draftRefreshSeconds = plugin.settings.refreshSeconds;
+    const statsEnabled = plugin.settings.statisticsEnabled;
+    const statsSubDisabled = !statsEnabled;
 
     new Setting(containerEl)
-      .setName("标题统计")
+      .setName("启用统计增强")
+      .setDesc("总开关：关闭后状态栏不再显示字数、字符数和标题数量，下面的选项会变淡并停用。")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(statsEnabled)
+          .onChange(async (value) => {
+            plugin.settings.statisticsEnabled = value;
+            await plugin.saveSettings();
+            this.display();
+          })
+      );
+
+    const headingStatsSetting = new Setting(containerEl)
+      .setName("标题数量统计")
       .setDesc("开启后在状态栏显示当前页面的1至5级标题数量；关闭后不扫描标题。")
       .addToggle((toggle) =>
         toggle
           .setValue(plugin.settings.headingStats)
+          .setDisabled(statsSubDisabled)
           .onChange(async (value) => {
             plugin.settings.headingStats = value;
             await plugin.saveSettings();
           })
       );
+    headingStatsSetting.settingEl.classList.toggle("valar-setting-faded", statsSubDisabled);
 
-    new Setting(containerEl)
+    const displayModeSetting = new Setting(containerEl)
       .setName("显示方式")
       .setDesc("选择右下角显示精确数字，还是以千字为单位显示。点击状态栏也可以切换。")
       .addDropdown((dropdown) =>
@@ -512,19 +535,24 @@ class ValarStyleEnhancementSettingTab extends PluginSettingTab {
           .addOption("exact", "单独字数")
           .addOption("thousands", "千字")
           .setValue(plugin.settings.displayMode)
+          .setDisabled(statsSubDisabled)
           .onChange(async (value) => {
             plugin.settings.displayMode = value;
             await plugin.saveSettings();
           })
       );
+    displayModeSetting.settingEl.classList.toggle("valar-setting-faded", statsSubDisabled);
 
-    new Setting(containerEl)
+    let draftRefreshSeconds = plugin.settings.refreshSeconds;
+
+    const refreshSetting = new Setting(containerEl)
       .setName("刷新时间（秒）")
       .setDesc("编辑时只标记内容变化；到达此时间后才重新统计。范围为 1–3600 秒。")
       .addText((text) =>
         text
           .setPlaceholder(String(DEFAULT_SETTINGS.refreshSeconds))
           .setValue(String(plugin.settings.refreshSeconds))
+          .setDisabled(statsSubDisabled)
           .onChange((value) => {
             draftRefreshSeconds = value;
           })
@@ -533,6 +561,7 @@ class ValarStyleEnhancementSettingTab extends PluginSettingTab {
         button
           .setButtonText("应用")
           .setCta()
+          .setDisabled(statsSubDisabled)
           .onClick(async () => {
             const seconds = Number(draftRefreshSeconds);
             if (!Number.isFinite(seconds)) return;
@@ -541,30 +570,36 @@ class ValarStyleEnhancementSettingTab extends PluginSettingTab {
             this.display();
           })
       );
+    refreshSetting.settingEl.classList.toggle("valar-setting-faded", statsSubDisabled);
 
-    containerEl.createEl("h3", { text: "文件目录自动换行" });
+    containerEl.createEl("h3", { text: "B 文件目录换行增强" });
 
-    let draftWrapMinChars = plugin.settings.wrapMinChars;
+    const wrapEnabled = plugin.settings.fileExplorerWrap;
+    const wrapSubDisabled = !wrapEnabled;
 
     new Setting(containerEl)
-      .setName("文件目录自动换行")
-      .setDesc("开启后，长文件名和文件夹名会换行显示完整内容；关闭则恢复单行省略号。")
+      .setName("启用文件目录换行增强")
+      .setDesc("总开关：开启后长文件名和文件夹名会换行显示完整内容；关闭则恢复单行省略号。")
       .addToggle((toggle) =>
         toggle
-          .setValue(plugin.settings.fileExplorerWrap)
+          .setValue(wrapEnabled)
           .onChange(async (value) => {
             plugin.settings.fileExplorerWrap = value;
             await plugin.saveSettings();
+            this.display();
           })
       );
 
-    new Setting(containerEl)
+    let draftWrapMinChars = plugin.settings.wrapMinChars;
+
+    const wrapMinSetting = new Setting(containerEl)
       .setName("换行最小字符数")
       .setDesc("超过这个字符数才换行；小于等于该数值的保持单行。")
       .addText((text) =>
         text
           .setPlaceholder(String(DEFAULT_SETTINGS.wrapMinChars))
           .setValue(String(plugin.settings.wrapMinChars))
+          .setDisabled(wrapSubDisabled)
           .onChange((value) => {
             draftWrapMinChars = value;
           })
@@ -573,6 +608,7 @@ class ValarStyleEnhancementSettingTab extends PluginSettingTab {
         button
           .setButtonText("应用")
           .setCta()
+          .setDisabled(wrapSubDisabled)
           .onClick(async () => {
             const parsed = parseInt(draftWrapMinChars, 10);
             plugin.settings.wrapMinChars = Number.isFinite(parsed)
@@ -582,17 +618,20 @@ class ValarStyleEnhancementSettingTab extends PluginSettingTab {
             this.display();
           })
       );
+    wrapMinSetting.settingEl.classList.toggle("valar-setting-faded", wrapSubDisabled);
 
-    new Setting(containerEl)
+    const wrapOnEditSetting = new Setting(containerEl)
       .setName("重命名时也换行")
       .setDesc("开启后，编辑文件名时也能多行显示完整内容。")
       .addToggle((toggle) =>
         toggle
           .setValue(plugin.settings.wrapOnEdit)
+          .setDisabled(wrapSubDisabled)
           .onChange(async (value) => {
             plugin.settings.wrapOnEdit = value;
             await plugin.saveSettings();
           })
       );
+    wrapOnEditSetting.settingEl.classList.toggle("valar-setting-faded", wrapSubDisabled);
   }
 }

@@ -1,3 +1,8 @@
 .status-bar-item.valar-style-enhancement {
   order: 1000;
 }
+
+.valar-setting-faded {
+  opacity: 0.45;
+  pointer-events: none;
+}
