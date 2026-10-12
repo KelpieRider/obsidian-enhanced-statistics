@@ -373,7 +373,7 @@ module.exports = class ValarStyleEnhancementPlugin extends Plugin {
 
       const text = view.editor.getValue();
       const { characterCount, wordCount } = countText(text);
-      const { displayMode, headingStats, refreshSeconds } = this.settings;
+      const { displayMode, headingStats } = this.settings;
       const displayParts = [
         `${formatCount(wordCount, displayMode)}词`,
         `${formatCount(characterCount, displayMode)}字符`,
@@ -384,19 +384,7 @@ module.exports = class ValarStyleEnhancementPlugin extends Plugin {
         displayParts.push(`标题 ${formatHeadingCount(headingCounts)}`);
       }
       const display = displayParts.join(" · ");
-      let ariaLabel =
-        `精确词数：${wordCount.toLocaleString("zh-CN")}；` +
-        `精确字符数：${characterCount.toLocaleString("zh-CN")}；`;
-      if (headingStats) {
-        ariaLabel += `标题数量（1级至${headingCounts.length}级）：${formatHeadingCount(headingCounts)}；`;
-      }
       this.statusBarItem.setText(display);
-      this.statusBarItem.setAttr(
-        "aria-label",
-        ariaLabel +
-          `当前显示：${displayMode === "exact" ? "单独字数" : "千字"}；` +
-          `每 ${refreshSeconds} 秒刷新；点击可切换`
-      );
       this.isDirty = false;
     } catch (error) {
       console.error("[valar-style-enhancement] refresh failed", error);

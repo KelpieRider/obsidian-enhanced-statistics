@@ -1,7 +1,7 @@
 {
   "id": "valar-style-enhancement",
   "name": "Valar的样式增强",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "minAppVersion": "1.4.0",
   "description": "Valar's Style Enhancements：统计字数、字符数和一至五级标题，并支持文件目录长文件名自动换行。",
   "author": "Valar",
